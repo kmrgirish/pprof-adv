@@ -10,6 +10,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type Stack struct {
+	Name     string
+	FileName string
+}
+
 // AnalyzeCPUProfile analyzes a pprof profile and returns CPU usage percentage per function
 // along with their call stacks. Returns a map of function nodes containing CPU percentages
 // and parent-child relationships representing the complete call graph.
@@ -24,10 +29,13 @@ import (
 //	for name, node := range cpuData {
 //	    fmt.Printf("%s: %.2f%% (self), %.2f%% (total)\n", name, node.SelfCPU, node.TotalCPU)
 //	}
-func AnalyzeCPUProfile(p *Profile) (map[string]*FunctionNode, error) {
+func AnalyzeCPUProfile(p *Profile, attrCPU bool) (map[string]*FunctionNode, error) {
 	if p == nil {
 		return nil, fmt.Errorf("nil profile")
 	}
+
+	// Build function info map first
+	funcInfoMap := buildFunctionInfoMap(p)
 
 	// Find CPU sample type index
 	cpuIdx := -1
@@ -63,7 +71,7 @@ func AnalyzeCPUProfile(p *Profile) (map[string]*FunctionNode, error) {
 		}
 
 		cpuTime := float64(sample.Value[cpuIdx]) / float64(totalCPU) * 100
-		stack := make([]string, 0, len(sample.LocationId))
+		stack := make([]Stack, 0, len(sample.LocationId))
 
 		// Build stack trace
 		for i := len(sample.LocationId) - 1; i >= 0; i-- {
@@ -72,15 +80,18 @@ func AnalyzeCPUProfile(p *Profile) (map[string]*FunctionNode, error) {
 				continue
 			}
 
-			funcName := getFunctionName(p, loc.Line[0].FunctionId)
-			if funcName == "" {
-				continue
+			if info, exists := funcInfoMap[loc.Line[0].FunctionId]; exists {
+				stack = append(stack, Stack{
+					Name:     info.Name,
+					FileName: info.FileName,
+				})
 			}
-			stack = append(stack, funcName)
 		}
 
 		// Update function nodes with this sample
-		updateFunctionNodes(functionNodes, stack, cpuTime)
+		if len(stack) > 0 {
+			updateFunctionNodes(functionNodes, stack, cpuTime, attrCPU)
+		}
 	}
 
 	return functionNodes, nil
@@ -89,11 +100,35 @@ func AnalyzeCPUProfile(p *Profile) (map[string]*FunctionNode, error) {
 // FunctionNode represents a node in the call tree with CPU usage information
 type FunctionNode struct {
 	Name        string
+	FileName    string  // Added field for source file name
 	SelfAttrCPU float64 // CPU time spent in this function only (excluding children and including core functions)
 	SelfCPU     float64 // CPU time spent in this function only
 	TotalCPU    float64 // CPU time including children
 	Children    map[string]*FunctionNode
 	ParentCount int // Number of times this function appears in different call stacks
+}
+
+// FunctionInfo stores the mapping of function details
+type FunctionInfo struct {
+	Name     string
+	FileName string
+}
+
+// buildFunctionInfoMap creates a map of function IDs to their names and file names
+func buildFunctionInfoMap(p *Profile) map[uint64]FunctionInfo {
+	funcMap := make(map[uint64]FunctionInfo)
+	for _, fn := range p.Function {
+		if fn.Name < int64(len(p.StringTable)) {
+			info := FunctionInfo{
+				Name: p.StringTable[fn.Name],
+			}
+			if fn.Filename < int64(len(p.StringTable)) {
+				info.FileName = p.StringTable[fn.Filename]
+			}
+			funcMap[fn.Id] = info
+		}
+	}
+	return funcMap
 }
 
 // Helper function to find location by ID
@@ -106,31 +141,24 @@ func findLocation(p *Profile, id uint64) *Location {
 	return nil
 }
 
-// Helper function to get function name
-func getFunctionName(p *Profile, id uint64) string {
-	for _, fn := range p.Function {
-		if fn.Id == id {
-			if fn.Name < int64(len(p.StringTable)) {
-				return p.StringTable[fn.Name]
-			}
-			break
-		}
-	}
-	return ""
-}
-
 // Helper function to update function nodes with a stack sample
-func updateFunctionNodes(nodes map[string]*FunctionNode, stack []string, cpuTime float64) {
+func updateFunctionNodes(
+	nodes map[string]*FunctionNode,
+	stack []Stack,
+	cpuTime float64,
+	attrCPU bool,
+) {
 	// Process each function in the stack
 	for i := len(stack) - 1; i >= 0; i-- {
-		funcName := stack[i]
-		node, exists := nodes[funcName]
+		entry := stack[i]
+		node, exists := nodes[entry.Name]
 		if !exists {
 			node = &FunctionNode{
-				Name:     funcName,
+				Name:     entry.Name,
+				FileName: entry.FileName,
 				Children: make(map[string]*FunctionNode),
 			}
-			nodes[funcName] = node
+			nodes[entry.Name] = node
 		}
 
 		// Update CPU times
@@ -142,17 +170,17 @@ func updateFunctionNodes(nodes map[string]*FunctionNode, stack []string, cpuTime
 		}
 
 		if i == len(stack)-2 {
-			childFuncName := stack[i+1]
-			if isCoreFn(childFuncName) {
+			childFuncName := stack[i+1].Name
+			if attrCPU && shouldAttrFn(childFuncName) {
 				node.SelfAttrCPU += cpuTime
 			}
 		}
 
 		// Add child relationship - the caller (at i) is the parent of the callee (at i+1)
 		if i < len(stack)-1 {
-			childName := stack[i+1] // Next entry in stack is the child
-			if _, exists := node.Children[childName]; !exists {
-				node.Children[childName] = nodes[childName]
+			childEntry := stack[i+1]
+			if _, exists := node.Children[childEntry.Name]; !exists {
+				node.Children[childEntry.Name] = nodes[childEntry.Name]
 			}
 		}
 	}
@@ -169,9 +197,9 @@ func Parse(r io.Reader) (*Profile, error) {
 	return profile, err
 }
 
-// isCoreFn checks if a function name is a core function (not a user-defined function)
+// shouldAttrFn checks if a function name is a core function (not a user-defined function)
 // e.g. runtime mallocs, mapaccess, concat string, etc.
-var isCoreFn = func() func(string) bool {
+var shouldAttrFn = func() func(string) bool {
 	pkgs, err := packages.Load(nil, "std")
 	if err != nil {
 		fmt.Printf("error loading std packages: %v\n", err)

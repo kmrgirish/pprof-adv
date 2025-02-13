@@ -35,7 +35,7 @@ func TestAnalyzeCPUProfile(t *testing.T) {
 		},
 	}
 
-	nodes, err := AnalyzeCPUProfile(profile)
+	nodes, err := AnalyzeCPUProfile(profile, false)
 	if err != nil {
 		t.Fatalf("AnalyzeCPUProfile failed: %v", err)
 	}
@@ -83,14 +83,14 @@ func TestAnalyzeCPUProfileWithEmptySamples(t *testing.T) {
 		Sample: []*Sample{},
 	}
 
-	_, err := AnalyzeCPUProfile(profile)
+	_, err := AnalyzeCPUProfile(profile, false)
 	if err == nil {
 		t.Error("Expected error for empty samples, got nil")
 	}
 }
 
 func TestAnalyzeCPUProfileWithNilProfile(t *testing.T) {
-	_, err := AnalyzeCPUProfile(nil)
+	_, err := AnalyzeCPUProfile(nil, false)
 	if err == nil {
 		t.Error("Expected error for nil profile, got nil")
 	}
@@ -104,7 +104,7 @@ func TestAnalyzeCPUProfileWithInvalidSampleType(t *testing.T) {
 		},
 	}
 
-	_, err := AnalyzeCPUProfile(profile)
+	_, err := AnalyzeCPUProfile(profile, false)
 	if err == nil {
 		t.Error("Expected error for non-CPU profile, got nil")
 	}
